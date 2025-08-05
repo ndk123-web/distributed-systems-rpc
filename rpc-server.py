@@ -1,259 +1,174 @@
 # signal_controller.py (Server)
 
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, jsonify, request, render_template_string
 import time
 import threading
 
 app = Flask(__name__)
 
-# Global state for the traffic signals
-# road_states[1] refers to Road 1 (Lanes 1 & 2)
-# road_states[2] refers to Road 2 (Lanes 3 & 4)
-# Initial state: Road 1 is RED, Road 2 is GREEN
-# This means traffic on Road 2 (Lanes 3 & 4) can flow.
-road_states = {
-    1: 'RED',
-    2: 'GREEN'
-}
-
-# A lock to ensure thread-safe access to the global road_states dictionary.
-# This prevents race conditions when multiple requests or threads try to modify it.
+# Global state for traffic and pedestrian signals
+road_states = {1: 'RED', 2: 'GREEN'}
+pedestrian_states = {1: 'RED', 2: 'RED'}
 signal_lock = threading.Lock()
 
-# --- HTML Dashboard for Visualizing Signal Status ---
-# This HTML provides a simple web interface to see the current state of both roads.
-# It includes a meta refresh tag to automatically update the page every few seconds.
+# --- Visual Dashboard (HTML with SVG) ---
 DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Traffic Signal Dashboard</title>
+    <title>Traffic Junction Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="refresh" content="3"> <!-- Auto-refresh every 3 seconds -->
-    <script src="https://cdn.tailwindcss.com"></script>
+    <meta http-equiv="refresh" content="2">
     <style>
-        body {
-            background-color: #1a1a1a;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            font-family: 'Inter', sans-serif;
-            color: white;
-            padding: 20px;
-        }
-        .container {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 50px;
-            margin-bottom: 30px;
-            justify-content: center;
-            align-items: center;
-        }
-        .signal-wrapper {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-        }
-        .signal-box {
-            width: 150px;
-            height: 150px;
-            border-radius: 50%;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            font-size: 24px;
-            font-weight: bold;
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
-            transition: background-color 0.5s ease-in-out;
-            border: 5px solid #333;
-        }
-        .signal-box.RED { background-color: red; color: white; }
-        .signal-box.YELLOW { background-color: yellow; color: black; }
-        .signal-box.GREEN { background-color: green; color: white; }
-        .road-label {
-            text-align: center;
-            font-size: 18px;
-            margin-top: 10px;
-            font-weight: bold;
-        }
-        .status-message {
-            font-size: 20px;
-            margin-top: 20px;
-            padding: 15px 30px;
-            background-color: #333;
-            border-radius: 8px;
-            box-shadow: 0 0 15px rgba(0, 0, 0, 0.3);
-            text-align: center;
-        }
-        @media (max-width: 768px) {
-            .container {
-                flex-direction: column;
-                gap: 30px;
-            }
-            .signal-box {
-                width: 120px;
-                height: 120px;
-                font-size: 20px;
-            }
-            .road-label {
-                font-size: 16px;
-            }
-            .status-message {
-                font-size: 18px;
-                padding: 10px 20px;
-            }
-        }
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; background-color: #2c3e50; color: white; margin: 0; }
+        .junction-container { display: flex; align-items: center; justify-content: center; position: relative; width: 600px; height: 600px; }
+        .road-label { position: absolute; font-weight: bold; font-size: 1.2rem; }
+        #road1-label { top: 20px; left: 50%; transform: translateX(-50%); }
+        #road2-label { bottom: 20px; left: 50%; transform: translateX(-50%); }
+        #ped1-label { top: 50%; left: 20px; transform: translateY(-50%) rotate(-90deg); }
+        #ped2-label { top: 50%; right: 20px; transform: translateY(-50%) rotate(90deg); }
+        .status-message { font-size: 1.2rem; margin-top: 20px; padding: 10px 20px; background: rgba(0,0,0,0.3); border-radius: 8px; }
     </style>
 </head>
 <body>
-    <h1 class="text-3xl font-bold mb-8">Traffic Junction Status</h1>
-    <div class="container">
-        <div class="signal-wrapper">
-            <div class="signal-box {{ road1_status }}">
-                {{ road1_status }}
-            </div>
-            <div class="road-label">Road 1 (Lanes 1 & 2)</div>
-        </div>
-        <div class="signal-wrapper">
-            <div class="signal-box {{ road2_status }}">
-                {{ road2_status }}
-            </div>
-            <div class="road-label">Road 2 (Lanes 3 & 4)</div>
-        </div>
+    <h1 style="margin-bottom: 40px;">Smart Traffic Junction Controller</h1>
+    <div class="junction-container">
+        <svg width="600" height="600" viewBox="0 0 600 600">
+            <rect x="250" y="250" width="100" height="100" fill="#666" />
+            <rect x="0" y="250" width="250" height="100" fill="#444" />
+            <rect x="350" y="250" width="250" height="100" fill="#444" />
+            <rect x="250" y="0" width="100" height="250" fill="#444" />
+            <rect x="250" y="350" width="100" height="250" fill="#444" />
+            <rect x="150" y="250" width="20" height="100" fill="white" />
+            <rect x="430" y="250" width="20" height="100" fill="white" />
+            <rect x="250" y="150" width="100" height="20" fill="white" />
+            <rect x="250" y="430" width="100" height="20" fill="white" />
+            <g id="road1-lights" transform="translate(250, 400)">
+                <circle cx="25" cy="0" r="10" fill="red" class="light" id="road1-red"></circle>
+                <circle cx="50" cy="0" r="10" fill="gray" class="light" id="road1-yellow"></circle>
+                <circle cx="75" cy="0" r="10" fill="gray" class="light" id="road1-green"></circle>
+            </g>
+            <g id="road2-lights" transform="translate(250, 150)">
+                <circle cx="25" cy="0" r="10" fill="gray" class="light" id="road2-red"></circle>
+                <circle cx="50" cy="0" r="10" fill="gray" class="light" id="road2-yellow"></circle>
+                <circle cx="75" cy="0" r="10" fill="green" class="light" id="road2-green"></circle>
+            </g>
+            <g id="ped1-lights" transform="translate(100, 250)">
+                <rect x="0" y="0" width="20" height="40" fill="white" rx="5" />
+                <path d="M5 10 L15 10 L15 30 L5 30 Z M10 5 L10 10 M10 30 L10 35 M5 25 L15 25" stroke="red" stroke-width="2" fill="none" class="ped-dont-walk" id="ped1-red"></path>
+                <path d="M5 25 L10 20 L15 25 M10 20 L10 5 M5 5 L15 5 L15 15 L5 15 Z" stroke="gray" stroke-width="2" fill="none" class="ped-walk" id="ped1-green"></path>
+            </g>
+            <g id="ped2-lights" transform="translate(480, 250)">
+                <rect x="0" y="0" width="20" height="40" fill="white" rx="5" />
+                <path d="M5 10 L15 10 L15 30 L5 30 Z M10 5 L10 10 M10 30 L10 35 M5 25 L15 25" stroke="gray" stroke-width="2" fill="none" class="ped-dont-walk" id="ped2-red"></path>
+                <path d="M5 25 L10 20 L15 25 M10 20 L10 5 M5 5 L15 5 L15 15 L5 15 Z" stroke="gray" stroke-width="2" fill="none" class="ped-walk" id="ped2-green"></path>
+            </g>
+        </svg>
+        <div id="status-message" class="status-message"></div>
     </div>
-    <div class="status-message">
-        Current Green Road: <span class="font-semibold">{{ current_green_road }}</span>
-    </div>
+    <script>
+        const statusEl = document.getElementById('status-message');
+        function updateLights(states) {
+            document.querySelectorAll('.light').forEach(el => el.setAttribute('fill', 'gray'));
+            document.querySelectorAll('.ped-walk, .ped-dont-walk').forEach(el => el.setAttribute('stroke', 'gray'));
+            document.querySelectorAll('.ped-walk, .ped-dont-walk').forEach(el => el.setAttribute('fill', 'none'));
+            
+            // Update Road 1
+            document.getElementById(`road1-${states.road_states[1].toLowerCase()}`).setAttribute('fill', states.road_states[1].toLowerCase());
+            // Update Road 2
+            document.getElementById(`road2-${states.road_states[2].toLowerCase()}`).setAttribute('fill', states.road_states[2].toLowerCase());
+            
+            // Update Pedestrian 1
+            if (states.pedestrian_states[1] === 'GREEN') {
+                document.getElementById('ped1-green').setAttribute('stroke', 'green');
+                document.getElementById('ped1-green').setAttribute('fill', 'green');
+            } else {
+                document.getElementById('ped1-red').setAttribute('stroke', 'red');
+            }
+            // Update Pedestrian 2
+            if (states.pedestrian_states[2] === 'GREEN') {
+                document.getElementById('ped2-green').setAttribute('stroke', 'green');
+                document.getElementById('ped2-green').setAttribute('fill', 'green');
+            } else {
+                document.getElementById('ped2-red').setAttribute('stroke', 'red');
+            }
+        }
+        
+        async function fetchStatus() {
+            try {
+                const response = await fetch('/status');
+                const data = await response.json();
+                updateLights(data);
+                statusEl.textContent = data.message;
+            } catch (error) {
+                statusEl.textContent = 'Server not reachable.';
+                console.error(error);
+            }
+        }
+        setInterval(fetchStatus, 500); // Poll for status every half second
+        fetchStatus();
+    </script>
 </body>
 </html>
 """
 
 @app.route('/')
 def dashboard():
-    """
-    Web endpoint to display the current status of both traffic signals.
-    This acts as a visual dashboard for the traffic junction.
-    """
+    return render_template_string(DASHBOARD_HTML)
+
+@app.route('/status')
+def get_status():
     with signal_lock:
-        # Get the current status of each road from the global state
-        road1_status = road_states[1]
-        road2_status = road_states[2]
-        # Determine which road is currently green for display purposes
-        current_green_road_display = "Road 1 (Lanes 1 & 2)" if road_states[1] == 'GREEN' else "Road 2 (Lanes 3 & 4)"
+        return jsonify({
+            'road_states': road_states,
+            'pedestrian_states': pedestrian_states,
+            'message': f"Road 1: {road_states[1]}, Road 2: {road_states[2]} | Ped 1: {pedestrian_states[1]}, Ped 2: {pedestrian_states[2]}"
+        })
+
+@app.route('/control_vehicle', methods=['POST'])
+def control_vehicle():
+    data = request.get_json()
+    target_road_id = int(data.get('road_id'))
     
-    # Render the HTML template, passing the current statuses
-    return render_template_string(
-        DASHBOARD_HTML,
-        road1_status=road1_status,
-        road2_status=road2_status,
-        current_green_road=current_green_road_display
-    )
-
-@app.route('/get_signal_status', methods=['GET'])
-def get_signal_status():
-    """
-    RPC endpoint (GET) for the client to retrieve the current state of all traffic signals.
-    Returns a JSON object containing the 'road_states' dictionary.
-    """
     with signal_lock:
-        # Return a copy of the current road_states to the client
-        return jsonify(road_states)
-
-def change_signal_sequence(target_road_id):
-    """
-    Manages the sequence of signal changes (Yellow -> Red -> Green).
-    This function is designed to run in a separate thread to prevent
-    blocking the main Flask application while waiting for signal transitions.
-    """
-    global road_states
-
-    # Determine the ID of the other road (the one that needs to turn yellow/red)
-    other_road_id = 1 if target_road_id == 2 else 2
-
-    print(f"[{time.strftime('%H:%M:%S')}] Initiating signal change sequence:")
-    print(f"  - Road {other_road_id} (Lanes {other_road_id*2-1} & {other_road_id*2}) will turn YELLOW then RED.")
-    print(f"  - Road {target_road_id} (Lanes {target_road_id*2-1} & {target_road_id*2}) will turn GREEN.")
-
-    # Phase 1: Other road turns YELLOW
-    with signal_lock:
-        road_states[other_road_id] = 'YELLOW'
-    print(f"[{time.strftime('%H:%M:%S')}] Road {other_road_id} is now YELLOW. Waiting 5 seconds...")
-    time.sleep(5) # Simulate the yellow light duration
-
-    # Phase 2: Other road turns RED
-    with signal_lock:
-        road_states[other_road_id] = 'RED'
-    print(f"[{time.strftime('%H:%M:%S')}] Road {other_road_id} is now RED. Brief pause...")
-    time.sleep(2) # Brief pause before turning the target green
-
-    # Phase 3: Target road turns GREEN
-    with signal_lock:
-        road_states[target_road_id] = 'GREEN'
-    print(f"[{time.strftime('%H:%M:%S')}] Road {target_road_id} is now GREEN. Cycle complete.")
-
-
-@app.route('/control_signal', methods=['POST'])
-def control_signal():
-    """
-    RPC endpoint (POST) for the client to request a traffic signal manipulation.
-    It expects a JSON payload with a 'lane_number' (1-4).
-    """
-    data = request.get_json() # Get the JSON data from the client's request
-
-    # Validate input: Check if 'lane_number' is present and valid
-    if not data or 'lane_number' not in data:
-        return jsonify({"error": "Missing 'lane_number' in request payload"}), 400
-    
-    try:
-        lane_number = int(data['lane_number'])
-        if not (1 <= lane_number <= 4):
-            return jsonify({"error": "Lane number must be between 1 and 4"}), 400
-    except ValueError:
-        return jsonify({"error": "Lane number must be an integer"}), 400
-
-    # Determine which main road (1 or 2) the requested lane belongs to
-    # Lanes 1 and 2 belong to Road 1; Lanes 3 and 4 belong to Road 2.
-    target_road_id = 1 if lane_number in [1, 2] else 2
-    other_road_id = 1 if target_road_id == 2 else 2
-
-    with signal_lock: # Acquire the lock before accessing/modifying global state
-        # Requirement: If the target road is already green, display "already green"
         if road_states[target_road_id] == 'GREEN':
-            print(f"[{time.strftime('%H:%M:%S')}] Request for Lane {lane_number}: Road {target_road_id} is already GREEN. No change needed.")
-            return jsonify({
-                "status": "already_green",
-                "message": f"Road {target_road_id} (Lanes {target_road_id*2-1} & {target_road_id*2}) is already GREEN."
-            })
+            return jsonify({"status": "already_green", "message": f"Road {target_road_id} is already GREEN."})
 
-        # Prevent new signal changes if another transition is already in progress
-        # (i.e., the other road is yellow or red, meaning it's transitioning from green)
-        if road_states[other_road_id] == 'YELLOW' or road_states[other_road_id] == 'RED':
-             print(f"[{time.strftime('%H:%M:%S')}] Request for Lane {lane_number}: Another signal change is in progress or just completed. Please wait.")
-             return jsonify({
-                 "status": "in_progress",
-                 "message": "Another signal change is in progress or just completed. Please wait."
-             })
+        other_road_id = 1 if target_road_id == 2 else 2
+        
+        # Change other road to YELLOW then RED
+        road_states[other_road_id] = 'YELLOW'
+        time.sleep(3)
+        road_states[other_road_id] = 'RED'
+        time.sleep(1)
+        
+        # Change target road to GREEN
+        road_states[target_road_id] = 'GREEN'
+        
+        return jsonify({"status": "success", "message": f"Signal changed. Road {target_road_id} is now GREEN."})
 
-        # If the target road is not green and no transition is ongoing,
-        # initiate the signal change sequence in a new thread.
-        print(f"[{time.strftime('%H:%M:%S')}] Request for Lane {lane_number}: Initiating signal change to make Road {target_road_id} GREEN.")
-        thread = threading.Thread(target=change_signal_sequence, args=(target_road_id,))
-        thread.start() # Start the new thread
+@app.route('/control_pedestrian', methods=['POST'])
+def control_pedestrian():
+    data = request.get_json()
+    crossing_id = int(data.get('crossing_id'))
+    
+    with signal_lock:
+        if road_states[crossing_id] == 'GREEN':
+            return jsonify({"status": "wait", "message": f"Road {crossing_id} is GREEN for vehicles. Pedestrians must wait."})
 
-    # Return an immediate success response to the client
-    return jsonify({
-        "status": "success",
-        "message": f"Signal change initiated for Road {target_road_id} (Lanes {target_road_id*2-1} & {target_road_id*2})."
-    })
+        # Change pedestrian signal to GREEN
+        pedestrian_states[crossing_id] = 'GREEN'
+        time.sleep(10)
+        
+        # Flash for a bit
+        pedestrian_states[crossing_id] = 'RED_FLASHING'
+        time.sleep(3)
+        
+        # Turn RED
+        pedestrian_states[crossing_id] = 'RED'
+        
+        return jsonify({"status": "success", "message": f"Pedestrian crossing {crossing_id} sequence completed."})
 
 if __name__ == '__main__':
-    # When the server starts, print its initial state.
-    print("Traffic Signal Controller Server starting...")
-    print(f"Initial state: Road 1 (Lanes 1/2) is {road_states[1]}, Road 2 (Lanes 3/4) is {road_states[2]}.")
-    # Run the Flask application.
-    # debug=False for production environments.
-    # host="0.0.0.0" makes the server accessible from other machines on the network.
+    print("Traffic Signal Controller Server starting on port 5000...")
     app.run(debug=True, host="0.0.0.0", port=5000)
