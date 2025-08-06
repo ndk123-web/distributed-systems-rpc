@@ -1,4 +1,4 @@
-# 🚦 Enhanced Traffic Server with Logging
+# 🚦 Auto Pedestrian Traffic Server
 
 from flask import Flask, jsonify, request, render_template_string
 import threading
@@ -11,7 +11,6 @@ app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Traffic state
 traffic_state = {
     'road1': 'RED',
     'road2': 'GREEN',
@@ -19,143 +18,82 @@ traffic_state = {
     'pedestrian2': 'RED'
 }
 
-# Logging system
 log_entries = []
 system_stats = {
     'total_requests': 0,
-    'successful_requests': 0,
-    'failed_requests': 0,
     'vehicle_requests': 0,
-    'pedestrian_requests': 0,
     'server_start_time': datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 }
 
 lock = threading.Lock()
 
-def add_log(log_type, action, message, success=True):
-    """Add a log entry with timestamp and details"""
+def add_log(log_type, action, message):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_entry = {
         'timestamp': timestamp,
         'type': log_type,
         'action': action,
-        'message': message,
-        'success': success,
-        'status': '✅ SUCCESS' if success else '❌ ERROR'
+        'message': message
     }
-    
     log_entries.append(log_entry)
-    if len(log_entries) > 100:  # Keep only last 100 logs
+    if len(log_entries) > 100:
         log_entries.pop(0)
-    
-    # Update stats
-    system_stats['total_requests'] += 1
-    if success:
-        system_stats['successful_requests'] += 1
-    else:
-        system_stats['failed_requests'] += 1
-    
-    if log_type == 'VEHICLE':
-        system_stats['vehicle_requests'] += 1
-    elif log_type == 'PEDESTRIAN':
-        system_stats['pedestrian_requests'] += 1
-    
-    # Emit log update to dashboard
     socketio.emit('log_update', {
-        'logs': log_entries[-10:],  # Send last 10 logs
+        'logs': log_entries[-10:],
         'stats': system_stats
     })
 
-@app.route('/api/control_pedestrian', methods=['POST'])
-def control_pedestrian():
-    data = request.get_json()
-    crossing_id = data.get('crossing_id')
-    road_id = crossing_id
+# Automatically update pedestrian signals based on road state
 
-    with lock:
-        if traffic_state[f'road{road_id}'] == 'GREEN':
-            error_msg = f"Cannot cross - Road {road_id} is GREEN for vehicles"
-            add_log('PEDESTRIAN', f'Crossing {crossing_id}', error_msg, success=False)
-            print(f"❌ Pedestrian crossing {crossing_id} denied: {error_msg}")
-            return jsonify({"success": False, "message": error_msg})
-
-    def crossing_sequence():
-        with lock:
-            traffic_state[f'pedestrian{crossing_id}'] = 'GREEN'
-            socketio.emit('update', traffic_state)
-            add_log('PEDESTRIAN', f'Crossing {crossing_id}', f'Pedestrian crossing {crossing_id} started (8 seconds)', success=True)
-            print(f"🚶 Pedestrian crossing {crossing_id} started - GREEN for 8 seconds")
-        
-        time.sleep(8)
-        
-        with lock:
-            traffic_state[f'pedestrian{crossing_id}'] = 'RED'
-            socketio.emit('update', traffic_state)
-            add_log('PEDESTRIAN', f'Crossing {crossing_id}', f'Pedestrian crossing {crossing_id} completed', success=True)
-            print(f"🛑 Pedestrian crossing {crossing_id} completed - back to RED")
-
-    threading.Thread(target=crossing_sequence, daemon=True).start()
-    success_msg = f"Pedestrian crossing {crossing_id} initiated successfully"
-    return jsonify({"success": True, "message": success_msg})
+def update_pedestrian_signals():
+    # If road is RED, pedestrian can cross (GREEN)
+    traffic_state['pedestrian1'] = 'GREEN' if traffic_state['road1'] == 'RED' else 'RED'
+    traffic_state['pedestrian2'] = 'GREEN' if traffic_state['road2'] == 'RED' else 'RED'
+    socketio.emit('update', traffic_state)
 
 @app.route('/api/control_vehicle', methods=['POST'])
 def control_vehicle():
     data = request.get_json()
     road_id = data.get('road_id')
-
     with lock:
         if traffic_state[f'road{road_id}'] == 'GREEN':
-            error_msg = f"Road {road_id} is already GREEN"
-            add_log('VEHICLE', f'Switch to Road {road_id}', error_msg, success=False)
-            print(f"❌ Vehicle request denied: {error_msg}")
-            return jsonify({"success": False, "message": error_msg})
-
+            add_log('VEHICLE', f'Switch to Road {road_id}', f"Road {road_id} is already GREEN")
+            return jsonify({"success": False, "message": f"Road {road_id} is already GREEN"})
     def vehicle_sequence():
         other_road_id = 2 if road_id == 1 else 1
-        
-        # Step 1: Other road to YELLOW
         with lock:
             traffic_state[f'road{other_road_id}'] = 'YELLOW'
             traffic_state[f'road{road_id}'] = 'RED'
             socketio.emit('update', traffic_state)
-            add_log('VEHICLE', f'Switch to Road {road_id}', f'Road {other_road_id} changed to YELLOW (warning phase)', success=True)
-            print(f"🟡 Road {other_road_id} → YELLOW (3 second warning)")
-        
+            add_log('VEHICLE', f'Switch to Road {road_id}', f"Road {other_road_id} changed to YELLOW")
         time.sleep(3)
-        
-        # Step 2: Other road to RED  
         with lock:
             traffic_state[f'road{other_road_id}'] = 'RED'
             socketio.emit('update', traffic_state)
-            add_log('VEHICLE', f'Switch to Road {road_id}', f'Road {other_road_id} changed to RED (clearance phase)', success=True)
-            print(f"🔴 Road {other_road_id} → RED (2 second clearance)")
-        
+            add_log('VEHICLE', f'Switch to Road {road_id}', f"Road {other_road_id} changed to RED")
         time.sleep(2)
-        
-        # Step 3: Target road to GREEN
         with lock:
             traffic_state[f'road{road_id}'] = 'GREEN'
             socketio.emit('update', traffic_state)
-            add_log('VEHICLE', f'Switch to Road {road_id}', f'Road {road_id} changed to GREEN (go phase)', success=True)
-            print(f"🟢 Road {road_id} → GREEN (vehicles can proceed)")
-
+            add_log('VEHICLE', f'Switch to Road {road_id}', f"Road {road_id} changed to GREEN")
+            update_pedestrian_signals()
     threading.Thread(target=vehicle_sequence, daemon=True).start()
-    success_msg = f"Traffic switch to Road {road_id} initiated successfully"
-    add_log('VEHICLE', f'Switch to Road {road_id}', 'Traffic switch sequence started', success=True)
-    return jsonify({"success": True, "message": success_msg})
+    system_stats['total_requests'] += 1
+    system_stats['vehicle_requests'] += 1
+    add_log('VEHICLE', f'Switch to Road {road_id}', 'Traffic switch sequence started')
+    return jsonify({"success": True, "message": f"Traffic switch to Road {road_id} initiated successfully"})
 
 @app.route('/api/status')
 def get_status():
     with lock:
         return jsonify({
             'traffic_state': traffic_state,
-            'logs': log_entries[-10:],  # Last 10 logs
+            'logs': log_entries[-10:],
             'stats': system_stats
         })
 
 @app.route('/api/logs')
 def get_logs():
-    """Get all logs"""
     return jsonify({
         'logs': log_entries,
         'stats': system_stats
@@ -163,18 +101,17 @@ def get_logs():
 
 @app.route('/api/clear_logs', methods=['POST'])
 def clear_logs():
-    """Clear all logs"""
     global log_entries
     log_entries = []
-    add_log('SYSTEM', 'Clear Logs', 'All logs cleared by user', success=True)
+    add_log('SYSTEM', 'Clear Logs', 'All logs cleared by user')
     return jsonify({"success": True, "message": "Logs cleared successfully"})
 
-# Enhanced Dashboard with Logs
+# Enhanced Dashboard with Logs (Complete UI)
 ENHANCED_DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>🚦 Enhanced Traffic Control Dashboard</title>
+    <title>🚦 Auto Pedestrian Traffic Control Dashboard</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.0/socket.io.js"></script>
     <style>
@@ -246,11 +183,9 @@ ENHANCED_DASHBOARD_HTML = """
             margin: 5px 0;
             padding: 10px;
             border-radius: 5px;
-            border-left: 4px solid;
+            border-left: 4px solid #4CAF50;
             font-size: 0.9rem;
         }
-        .log-entry.success { border-left-color: #4CAF50; }
-        .log-entry.error { border-left-color: #F44336; }
         .log-timestamp {
             color: #bbb;
             font-size: 0.8rem;
@@ -282,12 +217,22 @@ ENHANCED_DASHBOARD_HTML = """
             margin: 10px 0;
         }
         .clear-btn:hover { background: #d32f2f; }
+        .auto-note {
+            background: rgba(76, 175, 80, 0.2);
+            padding: 10px;
+            border-radius: 8px;
+            margin: 10px 0;
+            border-left: 4px solid #4CAF50;
+        }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🚦 Enhanced Traffic Control Dashboard</h1>
-        <p>Real-time monitoring with comprehensive logging</p>
+        <h1>🚦 Auto Pedestrian Traffic Control Dashboard</h1>
+        <p>Pedestrian signals automatically change based on road availability</p>
+        <div class="auto-note">
+            <strong>🤖 Auto Mode:</strong> Pedestrians can cross when road is RED (safe), blocked when road is GREEN
+        </div>
     </div>
 
     <div class="container">
@@ -315,15 +260,15 @@ ENHANCED_DASHBOARD_HTML = """
             </div>
 
             <div class="traffic-section">
-                <h3>Pedestrian Crossings</h3>
+                <h3>🚶 Auto Pedestrian Crossings</h3>
                 <div style="display: flex; gap: 30px; justify-content: center;">
                     <div style="text-align: center;">
-                        <p>Crossing 1</p>
+                        <p>Crossing 1 (Auto)</p>
                         <div id="ped1-light" class="light" style="width: 30px; height: 30px;"></div>
                         <div id="ped1-status"></div>
                     </div>
                     <div style="text-align: center;">
-                        <p>Crossing 2</p>
+                        <p>Crossing 2 (Auto)</p>
                         <div id="ped2-light" class="light" style="width: 30px; height: 30px;"></div>
                         <div id="ped2-status"></div>
                     </div>
@@ -339,20 +284,8 @@ ENHANCED_DASHBOARD_HTML = """
                     <div>Total Requests</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-number" id="successful-requests">0</div>
-                    <div>Successful</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number" id="failed-requests">0</div>
-                    <div>Failed</div>
-                </div>
-                <div class="stat-card">
                     <div class="stat-number" id="vehicle-requests">0</div>
-                    <div>Vehicle</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-number" id="pedestrian-requests">0</div>
-                    <div>Pedestrian</div>
+                    <div>Vehicle Requests</div>
                 </div>
             </div>
 
@@ -383,33 +316,30 @@ ENHANCED_DASHBOARD_HTML = """
             document.getElementById(`road2-${road2State}`).classList.add(road2State);
             document.getElementById('road2-status').textContent = `Status: ${state.road2}`;
             
-            // Update Pedestrian 1
+            // Update Pedestrian 1 (Auto)
             const ped1Light = document.getElementById('ped1-light');
             if (state.pedestrian1 === 'GREEN') {
                 ped1Light.classList.add('green');
-                document.getElementById('ped1-status').textContent = 'WALK';
+                document.getElementById('ped1-status').textContent = 'WALK (Auto)';
             } else {
                 ped1Light.classList.add('red');
-                document.getElementById('ped1-status').textContent = 'STOP';
+                document.getElementById('ped1-status').textContent = 'STOP (Auto)';
             }
             
-            // Update Pedestrian 2
+            // Update Pedestrian 2 (Auto)
             const ped2Light = document.getElementById('ped2-light');
             if (state.pedestrian2 === 'GREEN') {
                 ped2Light.classList.add('green');
-                document.getElementById('ped2-status').textContent = 'WALK';
+                document.getElementById('ped2-status').textContent = 'WALK (Auto)';
             } else {
                 ped2Light.classList.add('red');
-                document.getElementById('ped2-status').textContent = 'STOP';
+                document.getElementById('ped2-status').textContent = 'STOP (Auto)';
             }
         }
         
         function updateStats(stats) {
             document.getElementById('total-requests').textContent = stats.total_requests;
-            document.getElementById('successful-requests').textContent = stats.successful_requests;
-            document.getElementById('failed-requests').textContent = stats.failed_requests;
             document.getElementById('vehicle-requests').textContent = stats.vehicle_requests;
-            document.getElementById('pedestrian-requests').textContent = stats.pedestrian_requests;
         }
         
         function updateLogs(logs) {
@@ -420,9 +350,9 @@ ENHANCED_DASHBOARD_HTML = """
             }
             
             container.innerHTML = logs.slice(-10).reverse().map(log => `
-                <div class="log-entry ${log.success ? 'success' : 'error'}">
+                <div class="log-entry">
                     <div class="log-timestamp">${log.timestamp}</div>
-                    <div><strong>${log.status}</strong> [${log.type}] ${log.action}</div>
+                    <div><strong>[${log.type}]</strong> ${log.action}</div>
                     <div>${log.message}</div>
                 </div>
             `).join('');
@@ -477,7 +407,6 @@ def dashboard():
     return render_template_string(ENHANCED_DASHBOARD_HTML)
 
 if __name__ == '__main__':
-    add_log('SYSTEM', 'Server Start', 'Enhanced traffic server started successfully', success=True)
-    print("🚦 Enhanced Traffic Server with Logging running at http://localhost:5000")
-    print("📊 Dashboard includes real-time logs and statistics")
-    socketio.run(app, debug=True, port=5000,host= '0.0.0.0')
+    add_log('SYSTEM', 'Server Start', 'Auto pedestrian traffic server started successfully')
+    print("🚦 Auto Pedestrian Traffic Server running at http://localhost:5000")
+    socketio.run(app, debug=True, port=5000)
